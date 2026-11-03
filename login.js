@@ -6,7 +6,7 @@
  * entschlüsselt. Danach wird die eigentliche App (app.js) geladen.
  * ===================================================================== */
 (function () {
-  const APP_SRC = "app.js?v=7";
+  const APP_SRC = "app.js?v=11";
   const REMEMBER_KEY = "bestimmungstrainer-pw";
 
   async function decrypt(password) {

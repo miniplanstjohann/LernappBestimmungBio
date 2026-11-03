@@ -225,7 +225,7 @@ select {
 @media (min-width: 860px) {
   .exam-layout { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: start; }
   .exam-photo { position: sticky; top: 4.3rem; }
-  .exam-photo .photo img { max-height: calc(100vh - 9rem); }
+  .exam-photo .photo img { max-height: calc(100vh - 20rem); min-height: 0; }
 }
 @media (max-width: 859px) {
   .exam-photo .photo img { max-height: 36vh; }
@@ -298,3 +298,21 @@ body.no-scroll { overflow: hidden; }
 .remember input { accent-color: var(--accent); width: 1rem; height: 1rem; }
 .login-card .btn { width: 100%; }
 .login-msg { min-height: 1.3rem; font-size: .88rem; color: var(--bad); font-weight: 600; text-align: center; }
+
+/* ---------- Direkt bestimmen (unter dem Foto) ---------- */
+.guess-card { margin: .75rem 0 0; padding: .95rem 1.05rem; background: var(--surface); }
+.guess-card p { margin: 0 0 .1rem; }
+.guess-card .answer-row { margin-top: .6rem; }
+.tr.path .ic { background: var(--accent-soft); color: var(--accent-ink); }
+.path-box { margin: .4rem 0 .6rem; border: 1px solid var(--line); border-radius: 10px; padding: .55rem .8rem; background: var(--surface); }
+.path-box summary { cursor: pointer; font-weight: 600; font-size: .9rem; }
+.path-box .trail { margin: .5rem 0 0; }
+.path-box .tr:last-child { border-bottom: 0; }
+
+/* ---------- Überspringen & Nachfrage „Lösung aufdecken?“ ---------- */
+.photo-tools { gap: .5rem; align-items: center; flex-wrap: wrap; }
+.photo-tools .btn.small-btn { min-height: 32px; padding: .2rem .7rem; font-size: .82rem; }
+.reveal-ask { margin-top: .75rem; }
+.reveal-ask .fb { margin-top: 0; }
+.reveal-q { margin: .6rem 0 0; font-weight: 600; font-size: .92rem; }
+.reveal-ask .btns { margin-top: .5rem; }
