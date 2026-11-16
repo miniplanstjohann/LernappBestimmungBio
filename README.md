@@ -16,6 +16,15 @@ Startseite → Tiergruppe wählen → fünf Bereiche:
    Tipps in Stufen (Alternativen → Anfang → Stichworte) und Aufdecken.
 5. **★ Markierte Tiere** – mit ☆ markierte Tiere (im Schlüssel, beim Lernen, in beiden Prüfungen)
    landen hier und lassen sich in allen drei Übungen gezielt wiederholen.
+6. **📊 Lernfortschritt** – für jedes Tier der Anteil fehlerfreier Bestimmungen in Prozent (alle Modi zusammen).
+
+Auf der Startseite zusätzlich, gemischt über alle vier Gruppen:
+- **★ Alle markierten Tiere** – alle markierten Vögel, Säugerschädel, Insekten und Fische gemischt.
+- **⚠ Häufig falsch** – Tiere, die öfter als 3× falsch bestimmt wurden; sie verlassen den Bereich
+  nach 3× richtig in Folge.
+
+Weitere Funktionen: „Direkt bestimmen“ unter dem Foto (in der schriftlichen Prüfung optional mit
+Ordnung/Familie, z. B. „Carnivora; Canidae; Haushund“), Überspringen, Rechtschreibhinweise bei Namen.
 
 Tiere, die noch nicht sicher sitzen, kommen öfter dran. Der Fortschritt wird nur im Browser des Geräts gespeichert.
 

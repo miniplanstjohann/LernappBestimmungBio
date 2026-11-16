@@ -2,7 +2,8 @@
 
 /* =====================================================================
  * Bestimmungs-Trainer
- *   📖 Schlüssel ansehen · 🧠 Merkmal → Tier · 📷 Prüfung (Auswahl) · ✍️ Prüfung (schriftlich) · ★ Markierte Tiere
+ *   📖 Schlüssel ansehen · 🧠 Merkmal → Tier · 📷 Prüfung (Auswahl) · ✍️ Prüfung (schriftlich)
+ *   ★ Markierte Tiere (je Gruppe und gemischt) · ⚠ Häufig falsch · 📊 Lernfortschritt
  * ===================================================================== */
 
 /* ---------- kleine Helfer ---------- */
@@ -14,7 +15,6 @@ const boldNames = (tx) => [...(tx || "").matchAll(/\*\*(.+?)\*\*/g)].map((m) => 
 const labelText = (l) => (l ? (l.endsWith(".") ? l : l + ")") : "");
 const enc = encodeURIComponent;
 const IMG = typeof IMAGES !== "undefined" ? IMAGES : {};
-const short = (s, n) => (s.length > n ? s.slice(0, n - 1).trim() + "…" : s);
 
 function firstItalic(tx) {
   const m = (tx || "").replace(/\*\*(.+?)\*\*/g, "").match(/\*([^*]+)\*/);
@@ -42,7 +42,7 @@ const STORE_KEY = "bestimmungstrainer-v2";
 function loadDB() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { return {}; }
 }
-const DB = Object.assign({ learn: {}, exam: {}, write: {}, marked: {}, days: {}, examDate: "" }, loadDB());
+const DB = Object.assign({ learn: {}, exam: {}, write: {}, marked: {}, days: {}, examDate: "", fullName: false }, loadDB());
 for (const k of ["learn", "exam", "write", "marked", "days"]) DB[k] = DB[k] || {};
 function saveDB() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch (e) { /* privater Modus o. Ä. */ }
@@ -53,12 +53,46 @@ function rec(area, gid, name) {
   return (DB[area][gid][name] = DB[area][gid][name] || { box: 0, n: 0, ok: 0, last: 0 });
 }
 const peek = (area, gid, name) => (DB[area][gid] && DB[area][gid][name]) || { box: 0, n: 0, ok: 0, last: 0 };
-const dots = (box) => `<span class="dots" title="Lernstand ${box} von 5">${[1, 2, 3, 4, 5].map((i) => `<i class="${i <= box ? "on" : ""}"></i>`).join("")}</span>`;
+
+/* ---------- Lernfortschritt je Tier (über alle Modi zusammen) ---------- */
+const EMPTY_STAT = { right: 0, wrong: 0, help: 0, streak: 0, last: 0 };
+function statRec(gid, name) {
+  DB.stats[gid] = DB.stats[gid] || {};
+  return (DB.stats[gid][name] = DB.stats[gid][name] || { ...EMPTY_STAT });
+}
+const statOf = (gid, name) => (DB.stats[gid] && DB.stats[gid][name]) || EMPTY_STAT;
+const attempts = (s) => s.right + s.wrong + s.help;
+if (!DB.stats) {
+  // einmalige Übernahme des bisherigen Fortschritts: fehlerfreie Durchgänge = richtig, der Rest = mit Hilfe
+  DB.stats = {};
+  for (const area of ["learn", "exam", "write"]) for (const gid in DB[area]) for (const name in DB[area][gid]) {
+    const p = DB[area][gid][name], s = statRec(gid, name);
+    s.right += p.ok || 0;
+    s.help += Math.max(0, (p.n || 0) - (p.ok || 0));
+    s.last = Math.max(s.last, p.last || 0);
+  }
+  saveDB();
+}
+/* Ergebnis eines Durchgangs verbuchen: perfect = fehlerfrei, failed = mindestens einmal falsch / aufgedeckt, sonst „mit Hilfe“ */
 function updateBox(area, gid, name, perfect, failed) {
   const p = rec(area, gid, name);
   p.n++; p.last = Date.now();
   if (perfect) { p.ok++; p.box = Math.min(5, p.box + 1); } else if (failed) p.box = Math.max(0, p.box - 1);
+  const s = statRec(gid, name);
+  if (perfect) { s.right++; s.streak++; } else if (failed) { s.wrong++; s.streak = 0; } else { s.help++; s.streak = 0; }
+  s.last = Date.now();
   countDay(); saveDB();
+}
+/* „Häufig falsch“: mehr als 3× falsch – und noch nicht wieder 3× hintereinander richtig */
+const ERROR_LIMIT = 3, ERROR_STREAK = 3;
+const isErrorAnimal = (gid, name) => { const s = statOf(gid, name); return s.wrong > ERROR_LIMIT && s.streak < ERROR_STREAK; };
+function progBadge(gid, name, detail) {
+  const s = statOf(gid, name), n = attempts(s);
+  if (!n) return `<span class="prog none">noch nicht geübt</span>`;
+  const p = Math.round((s.right / n) * 100);
+  const cls = p >= 80 ? "hi" : p >= 50 ? "mid" : "lo";
+  const title = `${s.right}× richtig · ${s.wrong}× falsch · ${s.help}× mit Hilfe`;
+  return `<span class="prog ${cls}" title="${title}">${p} % richtig</span>${detail ? ` <span class="prog-detail">${title}</span>` : ""}`;
 }
 
 /* ---------- Markierte Tiere ---------- */
@@ -162,6 +196,12 @@ function makeLeaf(o, steps) {
 }
 const imagesOf = (gid, name) => IMG[gid + "/" + name] || [];
 const leafByName = (gid, name) => buildLeaves(groupById(gid).main).find((l) => l.name === name);
+/* Alle fett gedruckten Namen entlang des Weges, z. B. Carnivora → Canidae → Haushund (für „Mit Familie bestimmen“) */
+function chainOf(leaf) {
+  const out = [];
+  for (const s of leaf.steps) if (s.type === "res") for (const a of getAsks(s.node, s.node === leaf.node)) out.push(a);
+  return out.length ? out : [leaf.accept];
+}
 
 /* Von welcher Alternative aus ist welche Art erreichbar? (manche Arten haben mehrere gültige Wege) */
 const reachCache = {};
@@ -204,7 +244,7 @@ function expand(o) {
   return { trail, leaf: cur };
 }
 
-/* ---------- Textvergleich (grob, nicht wortwörtlich) ---------- */
+/* ---------- Textvergleich (Merkmale: grob, nicht wortwörtlich) ---------- */
 function norm(s) {
   return (s || "").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
     .replace(/[¹₁]/g, "1").replace(/[²₂]/g, "2").replace(/[³₃]/g, "3")
@@ -283,21 +323,62 @@ function judgeChoice(input, opts, isValid) {
   if (byLabel && top.includes(byLabel)) return isValid(byLabel) ? { v: "ok", opt: byLabel } : { v: "bad", msg: "Diese Alternative trifft nicht zu." };
   return { v: "part", msg: "Nicht eindeutig – das passt zu mehreren Alternativen. Formuliere etwas genauer." };
 }
+
+/* ---------- Namensvergleich mit Rechtschreibprüfung ----------
+ * Kleine Fehler (Tippfehler, Groß-/Kleinschreibung, ae statt ä …) werden erkannt, aber als Schreibfehler
+ * gemeldet und zählen nicht als fehlerfrei. → { v: ok | bad, spell, right, msg } */
 function judgeName(input, accepts, sci) {
-  const n = norm(input).replace(/ /g, "");
+  const raw = (input || "").trim().replace(/\s+/g, " ");
+  const n = norm(raw).replace(/ /g, "");
   if (!n) return null;
+  let hit = null;
   for (const a of accepts) {
     const an = norm(a).replace(/ /g, "");
-    if (n === an || (an.length >= 3 && n.includes(an))) return { v: "ok", msg: "" };
     const tol = an.length <= 5 ? 0 : an.length <= 9 ? 1 : 2;
-    if (lev(n, an) <= tol) return { v: "ok", msg: `Kleiner Tippfehler – geschrieben wird es „${accepts[0]}“.` };
+    if (n === an || (an.length >= 3 && n.includes(an)) || lev(n, an) <= tol) { hit = a; break; }
   }
-  if (sci) {
+  let viaSci = false;
+  if (!hit && sci) {
     const sn = norm(sci).replace(/ /g, "");
-    if (n === sn || lev(n, sn) <= 2) return { v: "ok", msg: `Der wissenschaftliche Name stimmt – fett gedruckt ist „${accepts[0]}“.` };
+    if (n === sn || lev(n, sn) <= 2) { hit = sci; viaSci = true; }
   }
-  return { v: "bad" };
+  if (!hit) return { v: "bad" };
+  const exact = raw.includes(hit) || (!viaSci && accepts.some((a) => raw.includes(a)));
+  const msgs = [];
+  if (!exact) msgs.push(`Achte auf die Rechtschreibung: richtig ist „${hit}“ – du hast „${raw}“ geschrieben.`);
+  if (viaSci) msgs.push(`Der wissenschaftliche Name stimmt – fett gedruckt im Schlüssel ist „${accepts[0]}“.`);
+  return { v: "ok", spell: !exact, right: hit, msg: msgs.join(" ") };
 }
+const spellHTML = (res) => (res && res.msg ? `<div class="fb ${res.spell ? "spell" : "info"}">${res.spell ? "✎ " : ""}${esc(res.msg)}</div>` : "");
+
+/* Mehrere fett gedruckte Namen auf einmal, z. B. „Carnivora; Canidae; Haushund“ (Reihenfolge egal) */
+function judgeChain(input, leaf) {
+  const chain = chainOf(leaf);
+  const parts = input.split(/\s*(?:[;,\n/→>|]|\s-\s)\s*/).map((p) => p.trim()).filter(Boolean);
+  const used = new Set();
+  const rows = chain.map((acc, i) => {
+    const sci = i === chain.length - 1 ? leaf.sci : null;
+    for (let j = 0; j < parts.length; j++) {
+      if (used.has(j)) continue;
+      const r = judgeName(parts[j], acc, sci);
+      if (r && r.v === "ok") { used.add(j); return { found: true, part: parts[j], res: r }; }
+    }
+    return { found: false };
+  });
+  // weitere erlaubte Namen derselben Stelle (z. B. „Waldmaus / Gelbhalsmaus“) zählen nicht als überzählig
+  const extra = parts.filter((p, j) => !used.has(j) && !chain.some((acc, i) => rows[i].found && judgeName(p, acc)?.v === "ok"));
+  const ok = rows.every((r) => r.found) && !extra.length;
+  const spell = rows.some((r) => r.found && r.res.spell);
+  return { v: ok ? "ok" : "bad", spell, rows, extra, chain };
+}
+function chainHTML(jc) {
+  const items = jc.rows.map((r) => r.found
+    ? `<li class="${r.res.spell ? "spell" : "ok"}">${r.res.spell ? "✎" : "✓"} ${esc(r.res.right)}${r.res.spell ? ` <span class="muted">(du: „${esc(r.part)}“)</span>` : ""}</li>`
+    : `<li class="miss">✗ hier fehlt noch ein fett gedruckter Name</li>`).join("");
+  const extra = jc.extra.map((p) => `<li class="miss">✗ „${esc(p)}“ passt an keiner Stelle</li>`).join("");
+  return `<ul class="chain-res">${items}${extra}</ul>`;
+}
+
 /* Wörter, die eine Alternative von ihren Geschwistern unterscheiden (für Tipps) */
 function keyWords(o) {
   const others = o.sib.filter((x) => x !== o).flatMap((x) => tokens(x.t));
@@ -326,20 +407,66 @@ function creditHTML(im) {
   return `Foto: ${esc(im.artist || "unbekannt")} · <a href="${esc(im.page)}" target="_blank" rel="noopener">${esc(im.license || "Wikimedia Commons")}</a>`;
 }
 const unitOf = (gid, n) => (gid === "insekten" ? (n === 1 ? "Ordnung" : "Ordnungen") : n === 1 ? "Art" : "Arten");
+const tiere = (n) => `${n} ${n === 1 ? "Tier" : "Tiere"}`;
 const pct = (a, b) => Math.round((a / Math.max(1, b)) * 100);
 const barHTML = (a, b) => `<span class="bar"><span style="width:${pct(a, b)}%"></span></span>`;
-const markedSuffix = (m) => (m ? "/m" : "");
 
-/* Tier-Auswahl für Lernen & Prüfung: schwache Tiere öfter, nicht dasselbe zweimal hintereinander */
-function pickLeaf(area, gid, pool, prev) {
+/* ---------- Übungs-Kontext: eine Gruppe, deren markierte Tiere oder gemischt über alle Gruppen ---------- */
+const MIX = {
+  m: { title: "Alle markierten Tiere", short: "alle markierten", icon: "★" },
+  f: { title: "Häufig falsch", short: "häufig falsch", icon: "⚠" },
+};
+function mixItems(mix, needImg) {
+  const out = [];
+  for (const g of GROUPS) for (const l of buildLeaves(g.main)) {
+    const inMix = mix === "m" ? isMarked(g.id, l.name) : isErrorAnimal(g.id, l.name);
+    if (inMix && (!needImg || imagesOf(g.id, l.name).length)) out.push({ gid: g.id, leaf: l });
+  }
+  return out;
+}
+function learnItems(ctx) {
+  if (ctx.mix) return mixItems(ctx.mix, false);
+  const gid = keyOfScope(ctx.scopeId).group;
+  let p = buildLeaves(ctx.scopeId);
+  if (ctx.marked) p = p.filter((l) => isMarked(gid, l.name));
+  return p.map((leaf) => ({ gid, leaf }));
+}
+function examItems(ctx) {
+  if (ctx.mix) return mixItems(ctx.mix, true);
+  let p = buildLeaves(groupById(ctx.gid).main).filter((l) => imagesOf(ctx.gid, l.name).length);
+  if (ctx.marked) p = p.filter((l) => isMarked(ctx.gid, l.name));
+  return p.map((leaf) => ({ gid: ctx.gid, leaf }));
+}
+const ctxKey = (c) => JSON.stringify([c.scopeId || c.gid || "", !!c.marked, c.mix || ""]);
+/* Tier-Auswahl: schwache Tiere öfter, nicht dasselbe zweimal hintereinander */
+function pickItem(area, items, prev) {
   const now = Date.now();
-  return pickWeighted(pool, (l) => {
-    if (l.name === prev && pool.length > 1) return 0;
-    const p = peek(area, gid, l.name);
+  return pickWeighted(items, (it) => {
+    if (prev && prev.gid === it.gid && prev.name === it.leaf.name && items.length > 1) return 0;
+    const p = peek(area, it.gid, it.leaf.name);
     let w = p.n ? Math.pow(6 - p.box, 2) : 16;
     if (p.last && now - p.last < 4 * 60000) w *= 0.3;
     return w;
   });
+}
+function ctxCrumbs(state, title) {
+  const c = state.ctx;
+  if (c.mix) return crumbs([["#/", "Start"], ["#/mix/" + c.mix, MIX[c.mix].title], [null, title]]);
+  const g = groupById(state.gid);
+  return crumbs([["#/", "Start"], ["#/g/" + g.id, g.name], c.marked ? ["#/m/" + g.id, "Markiert"] : null, [null, title]].filter(Boolean));
+}
+function poolText(state) {
+  const c = state.ctx, n = state.poolSize;
+  const unit = c.mix ? (n === 1 ? "Tier" : "Tiere") : unitOf(state.gid, n);
+  return `${n} ${unit} im Pool${c.marked ? " (markiert)" : c.mix ? ` (${MIX[c.mix].short})` : ""}`;
+}
+const sessionFor = (prev, ctx) => (prev && ctxKey(prev.ctx) === ctxKey(ctx) ? prev.session : { n: 0, perfect: 0, skipped: 0 });
+function emptyPool(ctx, title) {
+  const msg = ctx.mix === "m" ? "Unter deinen markierten Tieren ist keines mit Foto."
+    : ctx.mix === "f" ? "Gerade gibt es keine Tiere, die öfter als 3× falsch waren. 🎉"
+    : ctx.marked ? "Unter deinen markierten Tieren ist keines mit Foto." : "Für diese Gruppe sind keine Fotos hinterlegt.";
+  const fake = { ctx, gid: ctx.gid };
+  setPage(`${ctxCrumbs(fake, title)}<div class="card empty-state">${msg}</div>`);
 }
 
 /* ---------- Startseite ---------- */
@@ -372,7 +499,16 @@ function renderHome() {
       <span class="g-sub">${sure} sicher bestimmt</span>
     </a>`;
   }
-  setPage(h + `</div>`);
+  const nMarked = mixItems("m", false).length, nErr = mixItems("f", false).length;
+  h += `</div>
+  <h2 class="section-title">Gemischt über alle Gruppen</h2>
+  <div class="mix-tiles">
+    <a class="mix-tile" href="#/mix/m"><span class="m-icon">★</span><span><span class="m-title">Alle markierten Tiere</span>
+      <span class="m-text">${nMarked ? `${tiere(nMarked)} aus allen Gruppen gemischt abfragen` : "Noch keine Tiere markiert"}</span></span></a>
+    <a class="mix-tile warn" href="#/mix/f"><span class="m-icon">⚠</span><span><span class="m-title">Häufig falsch</span>
+      <span class="m-text">${nErr ? `${tiere(nErr)} ${nErr === 1 ? "war" : "waren"} öfter als 3× falsch` : "Kein Tier war öfter als 3× falsch"}</span></span></a>
+  </div>`;
+  setPage(h);
 }
 
 /* ---------- Gruppenseite ---------- */
@@ -383,6 +519,7 @@ function renderGroup(gid) {
   const withImg = leaves.filter((l) => imagesOf(gid, l.name).length).length;
   const count = (area) => leaves.filter((l) => peek(area, gid, l.name).box >= 2).length;
   const marked = markedList(gid).length;
+  const tried = leaves.filter((l) => attempts(statOf(gid, l.name))).length;
   const u = unitOf(gid, 2);
   const card = (href, icon, title, text, prog, extra = "") => `<a class="mode-card ${extra}" href="${href}">
       <span class="m-icon">${icon}</span>
@@ -399,6 +536,7 @@ function renderGroup(gid) {
     ${card(`#/x/${gid}`, "📷", "Prüfung mit Auswahl", "Echtes Foto – du wählst bei jedem Schritt die zutreffende Alternative aus.", prog(count("exam"), withImg, "sicher"))}
     ${card(`#/w/${gid}`, "✍️", "Prüfung schriftlich", "Wie im Testat: echtes Foto, du schreibst jedes Merkmal und jeden fett gedruckten Namen selbst auf. Mit Tipps und Aufdecken.", prog(count("write"), withImg, "sicher"), "accent")}
     ${card(`#/m/${gid}`, "★", "Markierte Tiere", marked ? `${marked} ${unitOf(gid, marked)} gemerkt – gezielt wiederholen.` : "Noch nichts markiert. Markiere schwierige Tiere mit ☆, dann landen sie hier.", "", "marked")}
+    ${card(`#/p/${gid}`, "📊", "Lernfortschritt", "Für jedes Tier: wie oft richtig und falsch – in Prozent.", `<span class="m-prog">${barHTML(tried, leaves.length)}${tried}/${leaves.length} ${u} schon geübt</span>`)}
   </div>`);
 }
 
@@ -412,7 +550,8 @@ function renderKey(kid) {
   const leafNames = new Set(buildLeaves(g.main).map((l) => l.name));
   const star = (node) => {
     const name = makeLeaf(node, []).name;
-    return leafNames.has(name) ? markBtn(g.id, name, " ") : "";
+    if (!leafNames.has(name)) return "";
+    return markBtn(g.id, name, " ") + (attempts(statOf(g.id, name)) ? " " + progBadge(g.id, name) : "");
   };
   function opts(list) {
     return `<ol class="couplet">${list.map((o) => {
@@ -441,14 +580,23 @@ function renderKey(kid) {
   <h1 class="key-title">${esc(k.title)} <span class="muted small">${esc(k.page || "")}</span></h1>
   ${sheet}
   <div class="card key-card">${k.single ? `<div class="kv-res">${txHTML(k.single)} ${star(singleNode(k))}</div>` : opts(k.items)}</div>
-  <p class="muted small legend"><b>Fett</b> = dicke Markierung im Schlüssel · ☆ = Tier markieren.${k.group === "insekten" ? " Deutsche Namen in Klammern sind eine Zusatzhilfe und stehen nicht im Original." : ""}</p>`);
+  <p class="muted small legend"><b>Fett</b> = dicke Markierung im Schlüssel · ☆ = Tier markieren · % = Anteil richtiger Bestimmungen.${k.group === "insekten" ? " Deutsche Namen in Klammern sind eine Zusatzhilfe und stehen nicht im Original." : ""}</p>`);
   const on = $(".key-nav .on");
   if (on) on.scrollIntoView({ inline: "center", block: "nearest" });
 }
 
 /* =====================================================================
- * ★ Markierte Tiere
+ * ★ Markierte Tiere / gemischte Bereiche
  * ===================================================================== */
+function animalCard(gid, leaf, foot) {
+  const im = imagesOf(gid, leaf.name)[0];
+  return `<div class="marked-item">
+      ${im ? `<img src="${esc(im.src)}" alt="" data-act="zoom">` : `<div class="noimg">kein Foto</div>`}
+      <div class="mi-body"><div class="mi-name">${txHTML(leaf.tx)}${leaf.de ? ` <span class="muted small">(${esc(leaf.de)})</span>` : ""}</div>
+      <div class="mi-prog">${progBadge(gid, leaf.name, true)}</div>
+      <div class="mi-foot">${foot}</div></div>
+    </div>`;
+}
 function renderMarked(gid) {
   const g = groupById(gid);
   if (!g) return renderHome();
@@ -467,37 +615,94 @@ function renderMarked(gid) {
     <a class="btn primary" href="#/l/${g.main}/m">🧠 Merkmal → Tier</a>
     ${withImg ? `<a class="btn" href="#/x/${gid}/m">📷 Prüfung mit Auswahl</a><a class="btn" href="#/w/${gid}/m">✍️ Prüfung schriftlich</a>` : ""}
   </div>
-  <p class="muted small">Diese Übungen verwenden nur deine ${names.length} markierten ${unitOf(gid, names.length)}.${withImg < names.length ? ` Für die Prüfungen zählen nur Tiere mit Foto (${withImg}).` : ""}</p>
-  <div class="marked-grid">${names.map((n) => {
-    const leaf = leafByName(gid, n);
-    const im = imagesOf(gid, n)[0];
-    const lv = Math.max(peek("learn", gid, n).box, peek("exam", gid, n).box, peek("write", gid, n).box);
-    return `<div class="marked-item">
-      ${im ? `<img src="${esc(im.src)}" alt="" data-act="zoom">` : `<div class="noimg">kein Foto</div>`}
-      <div class="mi-body"><div class="mi-name">${txHTML(leaf.tx)}${leaf.de ? ` <span class="muted small">(${esc(leaf.de)})</span>` : ""}</div>
-      <div class="mi-foot">${dots(lv)} ${markBtn(gid, n, "Entfernen")}</div></div>
-    </div>`;
-  }).join("")}</div>`;
+  <p class="muted small">Diese Übungen verwenden nur deine ${names.length} markierten ${unitOf(gid, names.length)}.${withImg < names.length ? ` Für die Prüfungen zählen nur Tiere mit Foto (${withImg}).` : ""} Alle markierten Tiere aus allen Gruppen gemischt findest du auf der <a href="#/mix/m">Startseite</a>.</p>
+  <div class="marked-grid">${names.map((n) => animalCard(gid, leafByName(gid, n), markBtn(gid, n, "Entfernen"))).join("")}</div>`;
   setPage(h);
+}
+function renderMix(mix) {
+  const M = MIX[mix];
+  if (!M) return renderHome();
+  const items = mixItems(mix, false);
+  const withImg = items.filter((it) => imagesOf(it.gid, it.leaf.name).length).length;
+  const intro = mix === "m"
+    ? "Alle Tiere, die du in irgendeiner Gruppe mit ☆ markiert hast – Vögel, Säugerschädel, Insekten und Fische gemischt."
+    : `Alle Tiere, die öfter als ${ERROR_LIMIT}× falsch bestimmt wurden (in irgendeinem Modus). Ein Tier verlässt diese Liste, sobald du es ${ERROR_STREAK}× hintereinander richtig hast – bei einem neuen Fehler kommt es zurück.`;
+  let h = `${crumbs([["#/", "Start"], [null, M.title]])}
+  <h1>${M.icon} ${M.title}</h1>
+  <p class="muted">${intro}</p>`;
+  if (!items.length) {
+    setPage(h + `<div class="card empty-state">${mix === "m" ? "Noch keine Tiere markiert. Markieren kannst du mit ☆ im Schlüssel, beim Lernen und in den Prüfungen." : "Gerade gibt es keine Tiere, die öfter als 3× falsch waren. 🎉"}</div>`);
+    return;
+  }
+  if (mix === "f") items.sort((a, b) => { const sa = statOf(a.gid, a.leaf.name), sb = statOf(b.gid, b.leaf.name); return sa.right / attempts(sa) - sb.right / attempts(sb); });
+  h += `<div class="marked-actions">
+    <a class="btn primary" href="#/l/alle/${mix}">🧠 Merkmal → Tier</a>
+    ${withImg ? `<a class="btn" href="#/x/alle/${mix}">📷 Prüfung mit Auswahl</a><a class="btn" href="#/w/alle/${mix}">✍️ Prüfung schriftlich</a>` : ""}
+  </div>
+  <p class="muted small">${tiere(items.length)}${withImg < items.length ? ` · für die Prüfungen zählen nur Tiere mit Foto (${withImg})` : ""}.</p>`;
+  for (const g of GROUPS) {
+    const mine = items.filter((it) => it.gid === g.id);
+    if (!mine.length) continue;
+    h += `<h2 class="section-title">${g.icon} ${esc(g.name)} <span class="muted small">${mine.length}</span></h2>
+    <div class="marked-grid">${mine.map((it) => {
+      const s = statOf(it.gid, it.leaf.name);
+      const foot = mix === "m" ? markBtn(it.gid, it.leaf.name, "Entfernen")
+        : `<span class="muted small">${s.streak ? `${s.streak}/${ERROR_STREAK} in Folge richtig` : `${s.wrong}× falsch`}</span>${markBtn(it.gid, it.leaf.name)}`;
+      return animalCard(it.gid, it.leaf, foot);
+    }).join("")}</div>`;
+  }
+  setPage(h);
+}
+
+/* =====================================================================
+ * 📊 Lernfortschritt je Tier
+ * ===================================================================== */
+function renderProgress(gid) {
+  const g = groupById(gid);
+  if (!g) return renderHome();
+  const leaves = buildLeaves(g.main).slice();
+  const score = (l) => { const s = statOf(gid, l.name), n = attempts(s); return n ? s.right / n : 2; };
+  leaves.sort((a, b) => score(a) - score(b) || a.name.localeCompare(b.name, "de"));
+  const tried = leaves.filter((l) => attempts(statOf(gid, l.name)));
+  const sum = tried.reduce((acc, l) => { const s = statOf(gid, l.name); acc.r += s.right; acc.n += attempts(s); return acc; }, { r: 0, n: 0 });
+  const nErr = leaves.filter((l) => isErrorAnimal(gid, l.name)).length;
+  setPage(`${crumbs([["#/", "Start"], ["#/g/" + gid, g.name], [null, "Lernfortschritt"]])}
+  <h1>📊 Lernfortschritt</h1>
+  <p class="muted">Alle Modi zusammen gezählt. Die Prozentzahl ist der Anteil der fehlerfreien Bestimmungen. „Mit Hilfe“ (Tipp, Zwischengruppe, Schreibfehler) zählt nicht als richtig, aber auch nicht als falsch.</p>
+  <div class="prog-summary">
+    <span><b>${tried.length}</b>/${leaves.length} ${unitOf(gid, 2)} geübt</span>
+    <span><b>${sum.n ? Math.round((sum.r / sum.n) * 100) : 0} %</b> richtig insgesamt</span>
+    <span><a href="#/mix/f">⚠ <b>${nErr}</b> häufig falsch</a></span>
+  </div>
+  <div class="card prog-table">
+    ${leaves.map((l) => {
+      const s = statOf(gid, l.name), n = attempts(s);
+      const p = n ? Math.round((s.right / n) * 100) : 0;
+      return `<div class="prog-row ${isErrorAnimal(gid, l.name) ? "err" : ""}">
+        <div class="pr-name">${txHTML(l.tx)}${l.de ? ` <span class="muted small">(${esc(l.de)})</span>` : ""}</div>
+        <div class="pr-bar">${n ? `<span class="bar ${p >= 80 ? "hi" : p >= 50 ? "mid" : "lo"}"><span style="width:${p}%"></span></span>` : ""}</div>
+        <div class="pr-val">${progBadge(gid, l.name)}<span class="prog-detail">${n ? `${s.right} richtig · ${s.wrong} falsch${s.help ? ` · ${s.help} mit Hilfe` : ""}` : ""}</span></div>
+        <div class="pr-mark">${markBtn(gid, l.name, " ")}</div>
+      </div>`;
+    }).join("")}
+  </div>`);
 }
 
 /* =====================================================================
  * 🧠 Lernen: Merkmal → Tier
  * ===================================================================== */
 let L = null;
-function startLearn(scopeId, onlyMarked) {
-  const gid = keyOfScope(scopeId).group;
-  let pool = buildLeaves(scopeId);
-  if (onlyMarked) pool = pool.filter((l) => isMarked(gid, l.name));
-  if (!pool.length) return renderMarked(gid);
-  const leaf = pickLeaf("learn", gid, pool, L && L.leaf && L.leaf.name);
-  const session = L && L.gid === gid && L.marked === !!onlyMarked ? L.session : { n: 0, ok: 0 };
-  L = { scopeId, gid, marked: !!onlyMarked, leaf, help: false, showMid: false, choices: null, input: "", fb: null, done: false, session, photo: 0, poolSize: pool.length };
+function startLearn(ctx) {
+  const items = learnItems(ctx);
+  if (!items.length) return ctx.mix ? renderMix(ctx.mix) : renderMarked(keyOfScope(ctx.scopeId).group);
+  const it = pickItem("learn", items, L && L.leaf && { gid: L.gid, name: L.leaf.name });
+  L = { ctx, gid: it.gid, leaf: it.leaf, help: false, failed: false, showMid: false, choices: null, input: "", fb: null, done: false, session: sessionFor(L, ctx), photo: 0, poolSize: items.length };
   renderLearn();
 }
 function finishLearn(ok) {
-  updateBox("learn", L.gid, L.leaf.name, ok && !L.help, !ok);
-  L.session.n++; if (ok && !L.help) L.session.ok++;
+  const perfect = ok && !L.help && !L.failed;
+  updateBox("learn", L.gid, L.leaf.name, perfect, !ok || L.failed);
+  L.session.n++; if (perfect) L.session.perfect++;
   L.done = true; L.ok = ok;
   renderLearn();
 }
@@ -505,23 +710,23 @@ function learnCheck(value) {
   if (L.done) return;
   const res = judgeName(value, L.leaf.accept, L.leaf.sci);
   if (!res) return;
-  if (res.v === "ok") { L.fb = res; return finishLearn(true); }
-  L.help = true;
+  if (res.v === "ok") { if (res.spell) L.help = true; L.fb = res; return finishLearn(true); }
+  L.failed = true;
   L.fb = { v: "bad", pick: value };
   renderLearn();
 }
 function renderLearn() {
-  const g = groupById(L.gid);
-  const leaf = L.leaf;
+  const leaf = L.leaf, c = L.ctx;
   const feats = leaf.steps.filter((s) => s.type === "choice");
   const mids = leaf.steps.filter((s) => s.type === "res" && s.node !== leaf.node && boldNames(s.node.tx).length).map((s) => getAsks(s.node)[0][0]);
-  const scopeSel = L.marked
-    ? `<span class="pill">★ nur markierte (${L.poolSize})</span>`
-    : `<select data-act="scope" aria-label="Schlüssel wählen">${scopesFor(L.gid).map((s) => `<option value="${esc(s.id)}" ${s.id === L.scopeId ? "selected" : ""}>${esc(s.main ? "Ganzer Schlüssel" : s.title)}</option>`).join("")}</select>`;
-  let h = `${crumbs([["#/", "Start"], ["#/g/" + g.id, g.name], L.marked ? ["#/m/" + g.id, "Markiert"] : null, [null, "Merkmal → Tier"]].filter(Boolean))}
+  const g = groupById(L.gid);
+  const scopeSel = c.mix ? `<span class="pill">${MIX[c.mix].icon} ${MIX[c.mix].short} (${L.poolSize})</span>`
+    : c.marked ? `<span class="pill">★ nur markierte (${L.poolSize})</span>`
+    : `<select data-act="scope" aria-label="Schlüssel wählen">${scopesFor(L.gid).map((s) => `<option value="${esc(s.id)}" ${s.id === c.scopeId ? "selected" : ""}>${esc(s.main ? "Ganzer Schlüssel" : s.title)}</option>`).join("")}</select>`;
+  let h = `${ctxCrumbs(L, "Merkmal → Tier")}
   <div class="toolbar"><h1>Merkmal → Tier</h1>${scopeSel}</div>
   <section class="card learn-card">
-    <div class="card-head"><div class="eyebrow">Welches Tier hat diese Merkmale?</div>${markBtn(L.gid, leaf.name)}</div>
+    <div class="card-head"><div class="eyebrow">${c.mix ? `${g.icon} ${esc(g.name)} · ` : ""}Welches Tier hat diese Merkmale?</div>${markBtn(L.gid, leaf.name)}</div>
     <ol class="feat">${feats.map((s) => `<li>${esc(s.node.t)}</li>`).join("")}</ol>`;
   if (!L.done) {
     if (L.showMid) h += `<div class="hintbox">${mids.length ? `Der Weg führt über: <b>${mids.map(esc).join(" → ")}</b>` : "Auf diesem Weg gibt es keine Zwischengruppe."}</div>`;
@@ -542,42 +747,40 @@ function renderLearn() {
   h += `</section>`;
   if (L.done) {
     const imgs = imagesOf(L.gid, leaf.name);
-    h += `<section class="card result ${L.ok ? (L.help ? "meh" : "good") : "bad"}">
-      <div class="eyebrow">${L.ok ? (L.help ? "Richtig – mit Hilfe" : "Richtig!") : "Auflösung"}</div>
+    const perfect = L.ok && !L.help && !L.failed;
+    h += `<section class="card result ${perfect ? "good" : L.ok ? "meh" : "bad"}">
+      <div class="eyebrow">${!L.ok ? "Auflösung" : perfect ? "Richtig!" : L.failed ? "Richtig – im zweiten Anlauf" : "Richtig – mit Hilfe"}</div>
       <div class="result-name">${txHTML(leaf.tx)}${leaf.de ? ` <span class="muted">(${esc(leaf.de)})</span>` : ""}</div>
-      ${L.ok && L.fb.msg ? `<p class="muted small">${esc(L.fb.msg)}</p>` : ""}
+      ${L.ok ? spellHTML(L.fb) : ""}
+      <p class="muted small">Lernfortschritt: ${progBadge(L.gid, leaf.name, true)}</p>
+      ${leftErrorNote(L)}
       ${imgs.length ? photoHTML(imgs, L.photo, { credit: true, small: true }) : ""}
       <div class="btns"><button class="btn primary" data-act="lnext">Nächstes Tier →</button></div>
     </section>`;
   }
-  h += `<p class="session muted small">Diese Runde: ${L.session.n} Tiere, ${L.session.ok} ohne Hilfe${L.session.skipped ? `, ${L.session.skipped} übersprungen` : ""} · Lernstand ${dots(peek("learn", L.gid, leaf.name).box)}</p>`;
+  h += `<p class="session muted small">Diese Runde: ${tiere(L.session.n)}, ${L.session.perfect} fehlerfrei${L.session.skipped ? `, ${L.session.skipped} übersprungen` : ""} · ${poolText(L)}</p>`;
   setPage(h);
   const inp = $("#ans");
   if (inp) inp.focus({ preventScroll: true });
   if (L.done) { $("[data-act=lnext]").focus({ preventScroll: true }); $(".result").scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+}
+/* Hinweis, wenn ein Tier den Bereich „Häufig falsch“ gerade verlassen hat */
+function leftErrorNote(state) {
+  const s = statOf(state.gid, state.leaf.name);
+  return s.wrong > ERROR_LIMIT && s.streak === ERROR_STREAK
+    ? `<div class="fb ok">🎉 ${ERROR_STREAK}× hintereinander richtig – dieses Tier ist aus „Häufig falsch“ raus.</div>` : "";
 }
 
 /* =====================================================================
  * 📷 Prüfung mit Auswahl
  * ===================================================================== */
 let X = null;
-function examPool(gid, onlyMarked) {
-  let pool = buildLeaves(groupById(gid).main).filter((l) => imagesOf(gid, l.name).length);
-  if (onlyMarked) pool = pool.filter((l) => isMarked(gid, l.name));
-  return pool;
-}
-function noPhotos(gid, onlyMarked, title) {
-  const g = groupById(gid);
-  setPage(`${crumbs([["#/", "Start"], ["#/g/" + gid, g.name], [null, title]])}<div class="card empty-state">${onlyMarked ? "Unter deinen markierten Tieren ist keines mit Foto." : "Für diese Gruppe sind keine Fotos hinterlegt."}</div>`);
-}
-function startExam(gid, onlyMarked) {
-  const g = groupById(gid);
-  const pool = examPool(gid, onlyMarked);
-  if (!pool.length) return noPhotos(gid, onlyMarked, "Prüfung mit Auswahl");
-  const leaf = pickLeaf("exam", gid, pool, X && X.leaf && X.leaf.name);
-  const imgs = imagesOf(gid, leaf.name);
-  const session = X && X.gid === gid && X.marked === !!onlyMarked ? X.session : { n: 0, perfect: 0 };
-  X = { gid, marked: !!onlyMarked, leaf, imgs, photo: Math.floor(Math.random() * imgs.length), opts: KEYS[g.main].items, trail: [], errors: 0, wrong: null, end: null, session, poolSize: pool.length };
+function startExam(ctx) {
+  const items = examItems(ctx);
+  if (!items.length) return emptyPool(ctx, "Prüfung mit Auswahl");
+  const it = pickItem("exam", items, X && X.leaf && { gid: X.gid, name: X.leaf.name });
+  const imgs = imagesOf(it.gid, it.leaf.name);
+  X = { ctx, gid: it.gid, leaf: it.leaf, imgs, photo: Math.floor(Math.random() * imgs.length), opts: KEYS[groupById(it.gid).main].items, trail: [], errors: 0, wrong: null, end: null, session: sessionFor(X, ctx), poolSize: items.length };
   renderExam();
 }
 const examValid = (o) => validFor(X.gid, X.leaf.name, o);
@@ -596,8 +799,10 @@ function examGo(o, ok) {
   X.trail.push(...r.trail);
   if (r.leaf) {
     X.end = r.leaf;
-    updateBox("exam", X.gid, X.leaf.name, X.errors === 0, X.errors > 0);
-    X.session.n++; if (X.errors === 0) X.session.perfect++;
+    const wrongGuess = (X.guess && X.guess.wrong) || 0;
+    const perfect = X.errors === 0 && !wrongGuess;
+    updateBox("exam", X.gid, X.leaf.name, perfect, !perfect);
+    X.session.n++; if (perfect) X.session.perfect++;
   } else X.opts = r.opts;
   renderExam();
 }
@@ -612,28 +817,38 @@ function trailHTML(trail) {
     return "";
   }).join("");
 }
+
 /* ---------- Direkt bestimmen: Namen gleich beim Foto eingeben (beide Prüfungsmodi) ---------- */
+const curState = () => (view() === "x" ? X : view() === "w" ? W : null);
+const chainMode = (state) => state === W && DB.fullName && chainOf(state.leaf).length > 1;
 function guessBox(state) {
   if (state.end) return "";
   const g = state.guess || {};
+  const chainOpt = state === W
+    ? `<label class="chain-toggle"><input type="checkbox" data-act="chain" ${DB.fullName ? "checked" : ""}> Mit Ordnung/Familie bestimmen <span class="muted">(z. B. „Carnivora; Canidae; Haushund“)</span></label>` : "";
+  const chain = chainMode(state);
   return `<section class="card guess-card">
     <div class="eyebrow">Direkt bestimmen</div>
-    <p class="muted small">Du erkennst das Tier schon? Gib den fett gedruckten Namen ein – oder bestimme es unten mit dem Schlüssel.</p>
-    <div class="answer-row"><input id="gans" class="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name des Tieres" value="${esc(g.input || "")}">
+    <p class="muted small">${chain
+      ? "Gib <b>alle fett gedruckten Namen</b> auf dem Weg durch den Schlüssel ein, getrennt mit Semikolon – also Ordnung/Gruppe, Familie und Art."
+      : "Du erkennst das Tier schon? Gib den fett gedruckten Namen ein – oder bestimme es unten mit dem Schlüssel."}</p>
+    ${chainOpt}
+    <div class="answer-row"><input id="gans" class="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${chain ? "z. B. Carnivora; Canidae; Haushund" : "Name des Tieres"}" value="${esc(g.input || "")}">
       <button class="btn primary" data-act="guess">Prüfen</button></div>
     ${g.hint ? `<div class="fb part">${esc(g.hint)}</div>` : ""}
     ${g.ask ? `<div class="reveal-ask">
-        <div class="fb bad">„${esc(g.last)}“ ist es nicht.</div>
+        <div class="fb bad">${g.chain ? "Das ist noch nicht ganz richtig:" : `„${esc(g.last)}“ ist es nicht.`}</div>
+        ${g.chain ? chainHTML(g.chain) : ""}
         <p class="reveal-q">Soll die Lösung aufgedeckt werden?</p>
         <div class="btns"><button class="btn" data-act="guess-reveal">Ja, aufdecken</button>
           <button class="btn primary" data-act="guess-retry">Nein, weiter versuchen</button></div>
       </div>`
-      : g.last ? `<div class="fb bad">„${esc(g.last)}“ ist es nicht. Versuch es nochmal oder bestimme mit dem Schlüssel weiter.</div>` : ""}
+      : g.last ? `<div class="fb bad">${g.chain ? "Noch nicht ganz richtig – versuch es nochmal oder bestimme mit dem Schlüssel weiter." : `„${esc(g.last)}“ ist es nicht. Versuch es nochmal oder bestimme mit dem Schlüssel weiter.`}</div>${g.chain ? chainHTML(g.chain) : ""}` : ""}
   </section>`;
 }
-/* Nach einem klaren Fehlversuch: Lösung aufdecken (zählt als nicht gewusst) oder weiter versuchen */
+/* Nach einem klaren Fehlversuch: Lösung aufdecken (zählt als falsch) oder weiter versuchen */
 function guessReveal() {
-  const state = view() === "x" ? X : view() === "w" ? W : null;
+  const state = curState();
   if (!state || state.end) return;
   state.guess.ask = false;
   state.direct = { revealed: true };
@@ -644,46 +859,62 @@ function guessReveal() {
   return state === X ? renderExam() : renderWrite();
 }
 function guessRetry() {
-  const state = view() === "x" ? X : view() === "w" ? W : null;
+  const state = curState();
   if (!state) return;
   state.guess.ask = false;
   state.guess.focus = true;
   return state === X ? renderExam() : renderWrite();
 }
 function guessCheck() {
-  const state = view() === "x" ? X : view() === "w" ? W : null;
+  const state = curState();
   if (!state || state.end) return;
   const inp = $("#gans");
   const value = inp ? inp.value : "";
   state.guess = state.guess || { wrong: 0 };
   state.guess.input = value;
-  const res = judgeName(value, state.leaf.accept, state.leaf.sci);
-  if (!res) return inp && inp.focus();
+  if (!value.trim()) return inp && inp.focus();
   state.guess.hint = null;
   state.guess.ask = false;
-  if (res.v !== "ok" && state.leaf.de && judgeName(value, state.leaf.de.split(/\s*[/(),]\s*/).filter(Boolean))?.v === "ok") {
-    // deutscher Zusatzname (Insekten) erkannt – Tier stimmt, gesucht ist aber der fett gedruckte Name
-    state.guess.hint = "Das Tier stimmt – gesucht ist aber der fett gedruckte (lateinische) Name aus dem Schlüssel.";
-    state.guess.last = null;
-    state.guess.focus = true;
-    return view() === "x" ? renderExam() : renderWrite();
-  }
-  if (res.v !== "ok") {
-    // klar falsch (kleine Tippfehler gelten oben schon als richtig) → erst nachfragen, ob aufgedeckt werden soll
-    state.guess.wrong++;
-    state.guess.last = value;
-    state.guess.ask = true;
-    return view() === "x" ? renderExam() : renderWrite();
+  state.guess.chain = null;
+  const rerenderState = () => (state === X ? renderExam() : renderWrite());
+  let res;
+  if (chainMode(state)) {
+    const jc = judgeChain(value, state.leaf);
+    if (jc.v !== "ok") {
+      state.guess.wrong++;
+      state.guess.last = value;
+      state.guess.chain = jc;
+      state.guess.ask = true;
+      return rerenderState();
+    }
+    res = { v: "ok", spell: jc.spell, chain: jc };
+  } else {
+    res = judgeName(value, state.leaf.accept, state.leaf.sci);
+    if (res.v !== "ok" && state.leaf.de && judgeName(value, state.leaf.de.split(/\s*[/(),]\s*/).filter(Boolean))?.v === "ok") {
+      // deutscher Zusatzname (Insekten) erkannt – Tier stimmt, gesucht ist aber der fett gedruckte Name
+      state.guess.hint = "Das Tier stimmt – gesucht ist aber der fett gedruckte (lateinische) Name aus dem Schlüssel.";
+      state.guess.last = null;
+      state.guess.focus = true;
+      return rerenderState();
+    }
+    if (res.v !== "ok") {
+      // klar falsch (kleine Schreibfehler gelten als erkannt) → erst nachfragen, ob aufgedeckt werden soll
+      state.guess.wrong++;
+      state.guess.last = value;
+      state.guess.ask = true;
+      return rerenderState();
+    }
   }
   // richtig erkannt → Bestimmung abschließen, der Weg durch den Schlüssel wird zum Nachlernen gezeigt
-  state.direct = { msg: res.msg };
+  state.direct = { res };
   state.end = state.leaf.node;
   if (state === W) W.cur = null;
-  const area = state === X ? "exam" : "write";
-  const flawless = state.guess.wrong === 0 && state.errors === 0 && !(state === W && W.hints);
-  updateBox(area, state.gid, state.leaf.name, flawless, state.guess.wrong > 0 || state.errors > 0);
+  const wrong = state.guess.wrong;
+  const failed = wrong > 0 || state.errors > 0 || (state === W && W.failed);
+  const flawless = !failed && !res.spell && !(state === W && W.hints);
+  updateBox(state === X ? "exam" : "write", state.gid, state.leaf.name, flawless, failed);
   state.session.n++; if (flawless) state.session.perfect++;
-  return state === X ? renderExam() : renderWrite();
+  return rerenderState();
 }
 function directResult(state, area, nextAct) {
   const steps = state.trail.filter((t) => t.type === "choice").length;
@@ -694,24 +925,28 @@ function directResult(state, area, nextAct) {
     const lastGuess = state.guess && state.guess.last;
     return resultCard(state, "Lösung aufgedeckt", "bad", `${lastGuess ? `Dein Tipp: „${esc(lastGuess)}“ · ` : ""}${wrong}× falsch geraten`, area, nextAct, pathBox);
   }
-  const flawless = wrong === 0 && state.errors === 0 && !(state === W && W.hints);
-  const title = flawless ? (steps ? `Richtig erkannt – nach ${steps} Schritt${steps === 1 ? "" : "en"}` : "Direkt richtig erkannt!") : "Richtig erkannt – im zweiten Anlauf";
-  const stats = `${wrong ? wrong + "× falsch geraten · " : ""}${state.direct.msg ? esc(state.direct.msg) + " · " : ""}Direkt bestimmt`;
-  return resultCard(state, title, flawless ? "good" : "meh", stats, area, nextAct, pathBox);
+  const res = state.direct.res;
+  const failed = wrong > 0 || state.errors > 0 || (state === W && W.failed);
+  const flawless = !failed && !res.spell && !(state === W && W.hints);
+  const title = flawless ? (steps ? `Richtig erkannt – nach ${steps} Schritt${steps === 1 ? "" : "en"}` : "Direkt richtig erkannt!")
+    : wrong ? "Richtig erkannt – im zweiten Anlauf" : res.spell ? "Richtig erkannt – mit Schreibfehler" : "Richtig erkannt";
+  const spell = res.chain ? (res.spell ? `<div class="fb spell">✎ Achte auf die Rechtschreibung:</div>${chainHTML(res.chain)}` : chainHTML(res.chain)) : spellHTML(res);
+  const stats = `${wrong ? wrong + "× falsch geraten · " : ""}Direkt bestimmt${res.chain ? " (mit Ordnung/Familie)" : ""}`;
+  return resultCard(state, title, flawless ? "good" : "meh", stats, area, nextAct, spell + pathBox);
 }
 
-function examFrame(state, title, inner, decisions) {
+function examFrame(state, title, inner) {
   const g = groupById(state.gid);
-  return `${crumbs([["#/", "Start"], ["#/g/" + g.id, g.name], state.marked ? ["#/m/" + g.id, "Markiert"] : null, [null, title]].filter(Boolean))}
+  return `${ctxCrumbs(state, title)}
   <div class="exam-layout">
-    <div class="exam-photo">${photoHTML(state.imgs, state.photo)}
+    <div class="exam-photo">${state.ctx.mix ? `<div class="group-pill">${g.icon} ${esc(g.name)}</div>` : ""}${photoHTML(state.imgs, state.photo)}
       <div class="photo-tools">${markBtn(state.gid, state.leaf.name, isMarked(state.gid, state.leaf.name) ? "Markiert" : "Dieses Tier markieren")}
         ${state.end ? "" : `<button class="btn small-btn ghost" data-act="skip" title="Ohne Wertung zum nächsten Tier">Überspringen →</button>`}</div>
       ${guessBox(state)}</div>
     <div class="exam-steps">
       ${state.trail.length ? `<ol class="trail">${trailHTML(state.trail)}</ol>` : `<p class="muted small intro">Bestimme das Tier auf dem Foto mit dem Schlüssel. Tippe auf das Foto, um es zu vergrößern.</p>`}
       ${inner}
-      <p class="session muted small">Diese Runde: ${state.session.n} Tiere, ${state.session.perfect} fehlerfrei${state.session.skipped ? `, ${state.session.skipped} übersprungen` : ""} · ${state.poolSize} ${unitOf(state.gid, state.poolSize)} im Pool${state.marked ? " (markiert)" : ""}</p>
+      <p class="session muted small">Diese Runde: ${tiere(state.session.n)}, ${state.session.perfect} fehlerfrei${state.session.skipped ? `, ${state.session.skipped} übersprungen` : ""} · ${poolText(state)}</p>
     </div>
   </div>`;
 }
@@ -735,7 +970,9 @@ function renderExam() {
   } else if (X.direct) {
     step = directResult(X, "exam", "xnext");
   } else {
-    step = resultCard(X, X.errors === 0 ? "Fehlerfrei bestimmt!" : `Bestimmt – mit ${X.errors} Fehler${X.errors === 1 ? "" : "n"}`, X.errors === 0 ? "good" : "meh", `${decisions} Entscheidungen`, "exam", "xnext");
+    const wrongGuess = (X.guess && X.guess.wrong) || 0;
+    const perfect = X.errors === 0 && !wrongGuess;
+    step = resultCard(X, perfect ? "Fehlerfrei bestimmt!" : `Bestimmt – mit ${X.errors + wrongGuess} Fehler${X.errors + wrongGuess === 1 ? "" : "n"}`, perfect ? "good" : "meh", `${decisions} Entscheidungen`, "exam", "xnext");
   }
   setPage(examFrame(X, "Prüfung mit Auswahl", step));
   afterExamRender();
@@ -746,7 +983,9 @@ function resultCard(state, title, cls, stats, area, nextAct, extra = "") {
   return `<section class="card result ${cls}">
     <div class="eyebrow">${esc(title)}</div>
     <div class="result-name">${txHTML(state.end.tx)}${state.end.de ? ` <span class="muted">(${esc(state.end.de)})</span>` : ""}</div>
-    <p class="muted small">${stats} · Lernstand ${dots(peek(area, state.gid, state.leaf.name).box)}</p>
+    <p class="muted small">${stats}</p>
+    <p class="muted small">Lernfortschritt: ${progBadge(state.gid, state.leaf.name, true)}</p>
+    ${leftErrorNote(state)}
     ${extra}
     <p class="credit small">${creditHTML(im)}</p>
     <div class="btns"><button class="btn primary" data-act="${nextAct}">Nächstes Tier →</button>
@@ -756,7 +995,7 @@ function resultCard(state, title, cls, stats, area, nextAct, extra = "") {
 function afterExamRender() {
   const f = $("[data-act=xnext]") || $("[data-act=wnext]") || $("[data-act=xcontinue]") || $("[data-act=wcontinue]");
   const inp = $("#wans");
-  const state = view() === "x" ? X : W;
+  const state = curState();
   if (state && state.guess && state.guess.focus && $("#gans")) { state.guess.focus = false; $("#gans").focus(); $("#gans").select(); }
   else if (inp && !inp.disabled) inp.focus({ preventScroll: true });
   else if (f) f.focus({ preventScroll: true });
@@ -768,14 +1007,12 @@ function afterExamRender() {
  * ✍️ Prüfung schriftlich – Merkmale und Namen selbst formulieren
  * ===================================================================== */
 let W = null;
-function startWrite(gid, onlyMarked) {
-  const g = groupById(gid);
-  const pool = examPool(gid, onlyMarked);
-  if (!pool.length) return noPhotos(gid, onlyMarked, "Prüfung schriftlich");
-  const leaf = pickLeaf("write", gid, pool, W && W.leaf && W.leaf.name);
-  const imgs = imagesOf(gid, leaf.name);
-  const session = W && W.gid === gid && W.marked === !!onlyMarked ? W.session : { n: 0, perfect: 0 };
-  W = { gid, marked: !!onlyMarked, leaf, imgs, photo: Math.floor(Math.random() * imgs.length), trail: [], queue: [], next: { opts: KEYS[g.main].items }, cur: null, end: null, errors: 0, hints: 0, session, poolSize: pool.length };
+function startWrite(ctx) {
+  const items = examItems(ctx);
+  if (!items.length) return emptyPool(ctx, "Prüfung schriftlich");
+  const it = pickItem("write", items, W && W.leaf && { gid: W.gid, name: W.leaf.name });
+  const imgs = imagesOf(it.gid, it.leaf.name);
+  W = { ctx, gid: it.gid, leaf: it.leaf, imgs, photo: Math.floor(Math.random() * imgs.length), trail: [], queue: [], next: { opts: KEYS[groupById(it.gid).main].items }, cur: null, end: null, errors: 0, hints: 0, failed: false, session: sessionFor(W, ctx), poolSize: items.length };
   writeAdvance();
 }
 /* Nächsten Schritt bestimmen: erst Ergebnisse/Namen aus der Warteschlange, dann die nächste Verzweigung */
@@ -786,7 +1023,7 @@ function writeAdvance() {
       const isLeaf = W.next.leaf === item.node;
       const asks = getAsks(item.node, isLeaf);
       if (asks.length) {
-        W.cur = { type: "name", node: item.node, asks, ai: 0, isLeaf, hint: 0, input: "", fb: null, revealed: false, wrong: 0 };
+        W.cur = { type: "name", node: item.node, asks, ai: 0, isLeaf, hint: 0, input: "", fb: null, revealed: false, wrong: 0, spell: false };
         return renderWrite();
       }
     }
@@ -796,12 +1033,13 @@ function writeAdvance() {
   W.cur = { type: "choice", opts: W.next.opts, hint: 0, input: "", fb: null, revealed: false, wrong: 0, solved: null };
   renderWrite();
 }
-function writeStatus(c) { return c.revealed ? "bad" : c.hint || c.wrong ? "hint" : "ok"; }
+function writeStatus(c) { return c.revealed ? "bad" : c.hint || c.wrong || c.spell ? "hint" : "ok"; }
 function writeCommit() {
   const c = W.cur;
   const st = writeStatus(c);
   if (st === "bad") W.errors++;
   if (st === "hint") W.hints++;
+  if (c.wrong || c.revealed) W.failed = true;
   if (c.type === "choice") {
     const o = c.solved;
     W.trail.push({ type: "choice", node: o, ok: st });
@@ -814,7 +1052,7 @@ function writeCommit() {
   // Namensschritt: ggf. weitere fett gedruckte Namen desselben Ergebnisses
   c.status = c.status === "bad" || st === "bad" ? "bad" : c.status === "hint" || st === "hint" ? "hint" : "ok";
   if (c.ai + 1 < c.asks.length) {
-    Object.assign(c, { ai: c.ai + 1, hint: 0, input: "", fb: null, revealed: false, wrong: 0 });
+    Object.assign(c, { ai: c.ai + 1, hint: 0, input: "", fb: null, revealed: false, wrong: 0, spell: false });
     return renderWrite();
   }
   W.trail.push({ type: "res", node: c.node, ok: c.status });
@@ -824,8 +1062,8 @@ function writeCommit() {
 function finishWrite() {
   W.end = W.next.leaf;
   W.cur = null;
-  const perfect = W.errors === 0 && W.hints === 0;
-  updateBox("write", W.gid, W.leaf.name, perfect, W.errors > 0);
+  const perfect = W.errors === 0 && W.hints === 0 && !W.failed;
+  updateBox("write", W.gid, W.leaf.name, perfect, W.failed);
   W.session.n++; if (perfect) W.session.perfect++;
   renderWrite();
 }
@@ -841,7 +1079,7 @@ function writeCheck() {
     else { if (res.v === "bad") c.wrong++; c.fb = res; }
   } else {
     const res = judgeName(c.input, c.asks[c.ai], c.isLeaf && c.ai === c.asks.length - 1 ? firstItalic(c.node.tx) : null);
-    if (res.v === "ok") c.fb = { v: "ok", msg: res.msg };
+    if (res.v === "ok") { c.fb = { v: "ok", res }; if (res.spell) c.spell = true; }
     else { c.wrong++; c.fb = { v: "bad", msg: "Leider nicht richtig." }; }
   }
   renderWrite();
@@ -883,9 +1121,9 @@ function renderWrite() {
     step = directResult(W, "write", "wnext");
   } else if (W.end) {
     const decisions = W.trail.filter((t) => t.type === "choice").length;
-    const perfect = W.errors === 0 && W.hints === 0;
-    step = resultCard(W, perfect ? "Fehlerfrei bestimmt!" : W.errors ? `Bestimmt – ${W.errors}× aufgedeckt` : "Bestimmt – mit Tipps", perfect ? "good" : "meh",
-      `${decisions} Merkmale · ${W.hints} mit Tipp/Fehlversuch · ${W.errors} aufgedeckt`, "write", "wnext");
+    const perfect = W.errors === 0 && W.hints === 0 && !W.failed;
+    step = resultCard(W, perfect ? "Fehlerfrei bestimmt!" : W.errors ? `Bestimmt – ${W.errors}× aufgedeckt` : W.failed ? "Bestimmt – mit Fehlversuchen" : "Bestimmt – mit Tipps/Schreibfehlern", perfect ? "good" : "meh",
+      `${decisions} Merkmale · ${W.hints} mit Tipp/Fehlversuch/Schreibfehler · ${W.errors} aufgedeckt`, "write", "wnext");
   } else {
     const c = W.cur;
     const done = c.fb && (c.fb.v === "ok" || c.fb.v === "shown");
@@ -903,7 +1141,7 @@ function renderWrite() {
       if (done) solution = `<div class="solution">${txHTML(c.node.tx)}</div>`;
     }
     const fb = c.fb && c.fb.v !== "ok" && c.fb.v !== "shown" ? `<div class="fb ${c.fb.v}">${esc(c.fb.msg)}</div>`
-      : c.fb && c.fb.v === "ok" ? `<div class="fb ok">Richtig!${c.fb.msg ? " " + esc(c.fb.msg) : ""}</div>`
+      : c.fb && c.fb.v === "ok" ? `<div class="fb ok">Richtig!</div>${spellHTML(c.fb.res)}`
       : c.fb && c.fb.v === "shown" ? `<div class="fb shown">Aufgedeckt – präg dir das ein.</div>` : "";
     const maxHint = c.type === "choice" ? 3 : 2;
     step = `<section class="card couplet-card write-card">
@@ -935,8 +1173,10 @@ function showNotice() {
       <li><b>Fotos:</b> Alle Fotos stammen von Wikimedia Commons und wurden einzeln auf die richtige Art geprüft. Die Säugerschädel kommen überwiegend aus Museumssammlungen. Urheber und Lizenz stehen nach jeder Bestimmung unter dem Ergebnis.</li>
       <li><b>Ohne Foto:</b> Für Strepsiptera (Fächerflügler), Haselmaus, Wasserspitzmaus und Zwergspitzmaus gibt es kein geprüftes Foto. Diese vier kommen nur im Schlüssel und im Bereich „Merkmal → Tier“ vor, nicht in den Prüfungen.</li>
       <li><b>Grenzen der Fotos:</b> Manche Merkmale lassen sich auf einem Foto nicht sicher beurteilen, z. B. Flügellänge in mm, eine gezähnte Mittelkralle, die Schädellänge oder Zähne bei sehr kleinen Schädeln. Im Testat hast du das echte Präparat vor dir. Die Fotos ersetzen das Üben am Präparat nicht – an solchen Stellen lernst du hier vor allem den Weg durch den Schlüssel.</li>
-      <li><b>Prüfung schriftlich:</b> Deine Eingabe wird grob mit den Alternativen verglichen – Stichworte reichen, kleine Tippfehler sind okay. Passt sie zu mehreren Alternativen, formuliere genauer. Beim Säugerschädel-Schritt „I³ größer als I² und I¹“ ist die Wortwahl fast gleich wie bei der Gegenalternative – nenne dort ausdrücklich, welcher Schneidezahn am größten ist, oder decke auf.</li>
-      <li><b>Fortschritt:</b> Lernstand und markierte Tiere werden nur in diesem Browser auf diesem Gerät gespeichert. Auf einem anderen Gerät, in einem anderen Browser oder nach dem Löschen der Browserdaten fängst du wieder bei null an.</li>
+      <li><b>Rechtschreibung bei Namen:</b> Kleine Schreibfehler (z. B. „Stokente“, „stockente“, „Carnivore“) werden erkannt, aber deutlich markiert – mit der richtigen Schreibweise. Sie zählen dann nicht als fehlerfrei.</li>
+      <li><b>Prüfung schriftlich:</b> Merkmale werden grob mit den Alternativen verglichen – Stichworte reichen. Passt die Eingabe zu mehreren Alternativen, formuliere genauer. Beim Säugerschädel-Schritt „I³ größer als I² und I¹“ ist die Wortwahl fast gleich wie bei der Gegenalternative – nenne dort ausdrücklich, welcher Schneidezahn am größten ist, oder decke auf. Mit „Mit Ordnung/Familie bestimmen“ verlangt das Feld „Direkt bestimmen“ alle fett gedruckten Namen auf dem Weg (z. B. „Carnivora; Canidae; Haushund“).</li>
+      <li><b>Lernfortschritt:</b> Bei jedem Tier siehst du, wie viel Prozent deiner Bestimmungen fehlerfrei waren. Tiere, die öfter als 3× falsch waren, landen im Bereich „Häufig falsch“ – bis du sie 3× hintereinander richtig hast.</li>
+      <li><b>Fortschritt speichern:</b> Lernstand und markierte Tiere werden nur in diesem Browser auf diesem Gerät gespeichert. Auf einem anderen Gerät, in einem anderen Browser oder nach dem Löschen der Browserdaten fängst du wieder bei null an.</li>
     </ol>
     <div class="btns"><button class="btn primary" data-act="notice-ok">Verstanden – los geht's</button></div>
   </div>`;
@@ -960,19 +1200,24 @@ function openZoom(src) {
 
 /* =====================================================================
  * Routing & Ereignisse
+ *   #/g/<gruppe> · #/k/<schlüssel> · #/m/<gruppe> · #/p/<gruppe> · #/mix/<m|f>
+ *   #/l/<schlüssel>[/m] · #/x/<gruppe>[/m] · #/w/<gruppe>[/m] · #/l|x|w/alle/<m|f>
  * ===================================================================== */
 function route() {
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean).map(decodeURIComponent);
   window.scrollTo(0, 0);
   document.querySelectorAll(".lightbox").forEach((e) => e.remove());
-  const m = parts[2] === "m";
   if (!parts.length) return renderHome();
-  if (parts[0] === "g") return renderGroup(parts[1]);
-  if (parts[0] === "k") return renderKey(parts[1]);
-  if (parts[0] === "m" && groupById(parts[1])) return renderMarked(parts[1]);
-  if (parts[0] === "l" && keyOfScope(parts[1])) return startLearn(parts[1], m);
-  if (parts[0] === "x" && groupById(parts[1])) return startExam(parts[1], m);
-  if (parts[0] === "w" && groupById(parts[1])) return startWrite(parts[1], m);
+  const [v, a, b] = parts;
+  const mix = a === "alle" && MIX[b] ? b : null;
+  if (v === "g") return renderGroup(a);
+  if (v === "k") return renderKey(a);
+  if (v === "m" && groupById(a)) return renderMarked(a);
+  if (v === "p" && groupById(a)) return renderProgress(a);
+  if (v === "mix") return renderMix(a);
+  if (v === "l" && (mix || keyOfScope(a))) return startLearn(mix ? { mix } : { scopeId: a, marked: b === "m" });
+  if (v === "x" && (mix || groupById(a))) return startExam(mix ? { mix } : { gid: a, marked: b === "m" });
+  if (v === "w" && (mix || groupById(a))) return startWrite(mix ? { mix } : { gid: a, marked: b === "m" });
   renderHome();
 }
 window.addEventListener("hashchange", route);
@@ -989,7 +1234,7 @@ document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-act]");
   if (!el) return;
   // angefangene Eingabe im Feld „Direkt bestimmen“ bei jedem Neuzeichnen behalten
-  const gst = view() === "x" ? X : view() === "w" ? W : null;
+  const gst = curState();
   if (gst && $("#gans")) { gst.guess = gst.guess || { wrong: 0 }; gst.guess.input = $("#gans").value; }
   switch (el.dataset.act) {
     case "guess": return guessCheck();
@@ -1001,9 +1246,9 @@ document.addEventListener("click", (e) => {
       const st = { x: X, w: W, l: L }[v];
       if (!st) return;
       st.session.skipped = (st.session.skipped || 0) + 1;
-      if (v === "x") return startExam(X.gid, X.marked);
-      if (v === "w") return startWrite(W.gid, W.marked);
-      return startLearn(L.scopeId, L.marked);
+      if (v === "x") return startExam(X.ctx);
+      if (v === "w") return startWrite(W.ctx);
+      return startLearn(L.ctx);
     }
     case "notice-ok": return closeNotice();
     case "notice-open": e.preventDefault(); return showNotice();
@@ -1015,10 +1260,10 @@ document.addEventListener("click", (e) => {
     }
     case "mark": {
       e.preventDefault();
-      if ($("#wans") && W) W.cur.input = $("#wans").value;
+      if ($("#wans") && W && W.cur) W.cur.input = $("#wans").value;
       if ($("#ans") && L) L.input = $("#ans").value;
       toggleMark(el.dataset.g, el.dataset.n);
-      if (view() === "k") { el.outerHTML = markBtn(el.dataset.g, el.dataset.n, " "); return; }
+      if (["k", "p"].includes(view())) { el.outerHTML = markBtn(el.dataset.g, el.dataset.n, " "); return; }
       return rerender();
     }
     case "lcheck": { const v = $("#ans").value; L.input = v; return learnCheck(v); }
@@ -1026,21 +1271,21 @@ document.addEventListener("click", (e) => {
     case "lmid": L.showMid = true; L.help = true; return renderLearn();
     case "lchoices": {
       if ($("#ans")) L.input = $("#ans").value;
-      const pool = buildLeaves(L.scopeId).filter((l) => l.name !== L.leaf.name);
+      const pool = buildLeaves(L.ctx.scopeId || groupById(L.gid).main).filter((l) => l.name !== L.leaf.name);
       L.choices = shuffle([L.leaf, ...shuffle(pool).slice(0, 3)]).map((l) => l.name);
       L.help = true; L.fb = null;
       return renderLearn();
     }
     case "lreveal": return finishLearn(false);
-    case "lnext": return startLearn(L.scopeId, L.marked);
+    case "lnext": return startLearn(L.ctx);
     case "xpick": return examPick(+el.dataset.i);
     case "xcontinue": return examGo(X.wrong.correct, false);
-    case "xnext": return startExam(X.gid, X.marked);
+    case "xnext": return startExam(X.ctx);
     case "wcheck": return writeCheck();
     case "whint": return writeHint();
     case "wreveal": return writeReveal();
     case "wcontinue": return writeCommit();
-    case "wnext": return startWrite(W.gid, W.marked);
+    case "wnext": return startWrite(W.ctx);
   }
 });
 
@@ -1048,6 +1293,10 @@ document.addEventListener("change", (e) => {
   const a = e.target.dataset && e.target.dataset.act;
   if (a === "exam") { DB.examDate = e.target.value; saveDB(); return renderHome(); }
   if (a === "scope") location.hash = "#/l/" + enc(e.target.value);
+  if (a === "chain") {
+    DB.fullName = e.target.checked; saveDB();
+    if (W) { W.guess = W.guess || { wrong: 0 }; W.guess.input = $("#gans") ? $("#gans").value : ""; W.guess.focus = true; renderWrite(); }
+  }
 });
 
 document.addEventListener("keydown", (e) => {
